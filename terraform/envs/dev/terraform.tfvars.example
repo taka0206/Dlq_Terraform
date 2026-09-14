@@ -1,0 +1,9 @@
+region      = "ap-northeast-1"
+name_prefix = "dlq-demo"
+
+# ECS タスクを起動するプライベートサブネット (NAT Gateway 経由で ECR に到達できること)
+subnet_ids         = ["subnet-xxxxxxxxxxxxxxxxx", "subnet-yyyyyyyyyyyyyyyyy"]
+security_group_ids = ["sg-zzzzzzzzzzzzzzzzz"]
+assign_public_ip   = false
+
+container_image = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/worker:latest"
