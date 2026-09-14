@@ -131,13 +131,8 @@ variable "enable_container_insights" {
 
 # ---------------------------------------------------------------------------
 # 監視 / アラーム
+# (通知連携は行わない。アラーム状態はダッシュボード / CLI で確認する)
 # ---------------------------------------------------------------------------
-variable "alarm_email_addresses" {
-  description = "アラート通知先メールアドレス。指定すると SNS サブスクリプションを作成する (確認メールの承認が必要)"
-  type        = list(string)
-  default     = []
-}
-
 variable "dlq_depth_alarm_threshold" {
   description = "DLQ 件数アラームのしきい値。この件数を超えるとアラーム状態になる"
   type        = number

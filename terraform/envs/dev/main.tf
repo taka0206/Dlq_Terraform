@@ -45,8 +45,7 @@ module "pipeline" {
   lambda_timeout_seconds     = 30
   visibility_timeout_seconds = 180
 
-  # 監視
-  alarm_email_addresses     = var.alarm_email_addresses
+  # 監視 (通知連携は行わず、ダッシュボード / CLI で状態を確認する)
   dlq_depth_alarm_threshold = 0
 
   tags = {

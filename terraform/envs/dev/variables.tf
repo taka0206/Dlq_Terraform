@@ -30,9 +30,3 @@ variable "container_image" {
   description = "ワーカーのコンテナイメージ"
   type        = string
 }
-
-variable "alarm_email_addresses" {
-  description = "アラート通知先メールアドレス"
-  type        = list(string)
-  default     = []
-}

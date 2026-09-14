@@ -48,11 +48,6 @@ output "ecs_log_group_name" {
   value       = aws_cloudwatch_log_group.ecs.name
 }
 
-output "sns_topic_arn" {
-  description = "アラーム通知先 SNS トピックの ARN"
-  value       = aws_sns_topic.alarm.arn
-}
-
 output "dashboard_name" {
   description = "CloudWatch ダッシュボード名"
   value       = aws_cloudwatch_dashboard.this.dashboard_name

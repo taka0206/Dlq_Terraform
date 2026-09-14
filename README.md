@@ -14,9 +14,9 @@ SQS のメッセージを Lambda 経由で ECS (Fargate) タスクとして処�
                     │
                     │ maxReceiveCount (既定 3) 回失敗
                     ↓
-                 [SQS DLQ] ──→ [CloudWatch アラーム] ──→ [SNS] ──→ 担当者へメール
-                    ↑                                                    │
-                    └──────── 原因修正後に再投入 (Redrive) ←──────────────┘
+                 [SQS DLQ] ──→ [CloudWatch アラーム] ──→ 担当者が確認して気づく
+                    ↑                                              │
+                    └────── 原因修正後に再投入 (Redrive) ←──────────┘
 ```
 
 作成されるリソース:
@@ -26,7 +26,7 @@ SQS のメッセージを Lambda 経由で ECS (Fargate) タスクとして処�
 | SQS | メインキュー、DLQ、redrive ポリシー、redrive 許可ポリシー |
 | Lambda | ディスパッチャ関数、イベントソースマッピング、実行ロール |
 | ECS | クラスター、Fargate タスク定義、タスクロール、タスク実行ロール |
-| 監視 | CloudWatch アラーム 4 本、ダッシュボード、SNS トピック、ロググループ 2 つ |
+| 監視 | CloudWatch アラーム 4 本、ダッシュボード、ロググループ 2 つ |
 
 ---
 
@@ -76,8 +76,19 @@ terraform plan               # 差分を必ず目視する
 terraform apply
 ```
 
-適用後、**SNS から届く確認メールの「Confirm subscription」を必ずクリックしてください。**
-承認しないとアラームが発報しても通知が届きません。
+> ⚠️ **本構成は通知連携（SNS 等）を行いません。**
+> アラームは `ALARM` 状態になるだけで、担当者への通知は飛びません。
+> 検知は **日次点検で `describe-alarms` を確認する** プル型の運用になります。
+> 点検が回らないと DLQ の滞留に気づけないため、当番制などで確実に実施してください。
+> 通知が必要になった場合の追加方法は
+> [`docs/DLQ運用ガイド.md` の補足](docs/DLQ運用ガイド.md#補足-通知が必要になった場合) を参照してください。
+
+```bash
+# 日次点検（ALARM 状態のアラームだけを抽出する）
+aws cloudwatch describe-alarms --state-value ALARM \
+  --alarm-name-prefix dlq-demo \
+  --query 'MetricAlarms[].[AlarmName,StateReason]' --output table
+```
 
 ---
 
@@ -103,7 +114,7 @@ terraform apply
             ├── lambda.tf         # Lambda とイベントソースマッピング
             ├── ecs.tf            # クラスターとタスク定義
             ├── iam.tf            # 各ロールと最小権限ポリシー
-            ├── cloudwatch.tf     # アラーム 4 本・ダッシュボード・SNS
+            ├── cloudwatch.tf     # アラーム 4 本・ダッシュボード
             └── outputs.tf        # 運用コマンドで使う出力値
 ```
 
@@ -119,7 +130,8 @@ terraform apply
 | `ReportBatchItemFailures` | 有効 | バッチ内の失敗分だけをキューに残し、成功分の再処理を防ぐ |
 | `RunTask` の `failures` 検査 | 例外化 | HTTP 200 でもタスク起動に失敗することがあり、見落とすとメッセージロストになる |
 | DLQ 件数アラームの統計 | `Maximum` | 残高メトリクスを `Sum` にすると件数が水増しされる |
-| `treat_missing_data` | `notBreaching` | DLQ が空だとメトリクスが欠落するため、誤発報を防ぐ |
+| `treat_missing_data` | `notBreaching` | DLQ が空だとメトリクスが欠落するため、誤検知を防ぐ |
+| 通知連携 | 行わない | アラームは状態判定のみ。検知は日次点検によるプル型（上記の注意書きを参照） |
 | Lambda 最大同時実行数 | 10 | `RunTask` のスロットリングとサブネットの IP 枯渇を防ぐ |
 
 ---

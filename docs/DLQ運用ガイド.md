@@ -13,7 +13,7 @@
 3. [構築手順](#3-構築手順)
 4. [設定値リファレンス](#4-設定値リファレンス)
 5. [障害対応フロー（本編）](#5-障害対応フロー本編)
-   - [STEP 1: アラームで気づく](#step-1-アラームで気づく)
+   - [STEP 1: アラームの状態を確認する](#step-1-アラームの状態を確認する)
    - [STEP 2: 件数を確認する](#step-2-件数を確認する)
    - [STEP 3: 中身を確認する](#step-3-中身を確認する)
    - [STEP 4: 原因を特定する](#step-4-原因を特定する)
@@ -23,6 +23,7 @@
 6. [よくあるトラブルと対処](#6-よくあるトラブルと対処)
 7. [運用チェックリスト](#7-運用チェックリスト)
 8. [用語集](#8-用語集)
+9. [補足: 通知が必要になった場合](#補足-通知が必要になった場合)
 
 ---
 
@@ -57,16 +58,22 @@
                             ↓
                     [DLQ] ← ここに退避される
                             ↓
-                 CloudWatch アラームが発報 → SNS → 担当者へメール
+             CloudWatch アラームが ALARM 状態になる
+                            ↓
+          ダッシュボード / describe-alarms で担当者が気づく
 ```
+
+> 本構成では **SNS などへの通知連携は行いません**。アラームは「鳴って知らせてくれるもの」ではなく、
+> **「見に行けば状態がわかるもの」** です。気づくのは定期確認に依存するため、
+> [7. 運用チェックリスト](#7-運用チェックリスト) の日次点検を必ず回してください。
 
 **ポイント**: DLQ 行きは SQS が自動で行います。Lambda や Terraform が何かをするわけではありません。「**受信回数が `maxReceiveCount` に達したメッセージを DLQ に移す**」という SQS の機能です。
 
 ### 1-3. 復旧の流れ（このドキュメントの主題）
 
 ```
- ①アラーム受信 → ②件数確認 → ③中身確認 → ④原因特定 → ⑤修正 → ⑥再投入 → ⑦復旧確認
-   (SNS メール)  (CloudWatch) (SQS ポーリング) (Logs)   (デプロイ) (Redrive) (DLQ が 0 件)
+ ①アラーム確認 → ②件数確認 → ③中身確認 → ④原因特定 → ⑤修正 → ⑥再投入 → ⑦復旧確認
+  (定期確認で検知) (CloudWatch) (SQS ポーリング) (Logs)   (デプロイ) (Redrive) (DLQ が 0 件)
 ```
 
 > ⚠️ **最重要**: **⑤ の修正前に ⑥ の再投入をしてはいけません。** 原因が残ったまま再投入すると、また 3 回失敗して DLQ に戻るだけです（無限ループ・コスト増）。
@@ -123,17 +130,16 @@ terraform apply
 
 ### 3-3. 適用直後にやること
 
-1. **SNS のメール購読を承認する**
-   `alarm_email_addresses` に指定したアドレスへ AWS から確認メールが届きます。本文中の **Confirm subscription** を必ずクリックしてください。
-   これを忘れるとアラームが発報しても誰にも通知が届きません。
-
-   承認済みかどうかは次のコマンドで確認できます（`PendingConfirmation` になっていないこと）。
+1. **アラームが 4 本作成されたことを確認する**
 
    ```bash
-   aws sns list-subscriptions-by-topic \
-     --topic-arn "$(terraform output -raw sns_topic_arn)" \
-     --query 'Subscriptions[].[Endpoint,SubscriptionArn]' --output table
+   aws cloudwatch describe-alarms \
+     --alarm-name-prefix dlq-demo \
+     --query 'MetricAlarms[].[AlarmName,StateValue]' --output table
    ```
+
+   4 本すべてが表示されることを確認します。直後は `INSUFFICIENT_DATA` でも問題ありません
+   （メトリクスがまだ届いていないだけです）。
 
 2. **出力値を控える**
 
@@ -178,9 +184,13 @@ resource "aws_sqs_queue_redrive_allow_policy" "dlq" {
 
 ### 4-3. CloudWatch アラーム 4 本
 
+> **本構成のアラームには `alarm_actions`（通知先）を設定していません。**
+> アラームは「状態を判定して記録する」ところまでを担い、担当者への通知は行いません。
+> そのため各アラームは **「見に行くための指標」** として使います。
+
 | # | アラーム名 | メトリクス | 統計 | 期間 | しきい値 | 何を意味するか |
 |---|---|---|---|---|---|---|
-| 1 | `<prefix>-dlq-messages-visible` ★最重要 | `ApproximateNumberOfMessagesVisible` | **Maximum** | 60 秒 | `> 0` | **DLQ に未処理のメッセージが滞留している**。1 件でも残っていれば発報し続ける |
+| 1 | `<prefix>-dlq-messages-visible` ★最重要 | `ApproximateNumberOfMessagesVisible` | **Maximum** | 60 秒 | `> 0` | **DLQ に未処理のメッセージが滞留している**。1 件でも残っていれば `ALARM` のままになる |
 | 2 | `<prefix>-dlq-messages-sent` | `NumberOfMessagesSent` | **Sum** | 300 秒 | `> 0` | **新たに DLQ へ流入した**。増加の瞬間を捉える |
 | 3 | `<prefix>-main-queue-age` | `ApproximateAgeOfOldestMessage` | Maximum | 300 秒 × 2 回 | `> 900` 秒 | メインキューの消化が遅れている。DLQ 大量発生の**前兆** |
 | 4 | `<prefix>-lambda-errors` | `Errors`（AWS/Lambda） | Sum | 300 秒 | `>= 1` | Lambda が失敗した。**DLQ 行きの根本原因を最初に見る場所** |
@@ -198,13 +208,13 @@ DLQ が空のとき、SQS はメトリクスを送信しないことがありま
 
 ### 4-4. アラームのしきい値を調整したい場合
 
-DLQ に 1 件でも入ったら即通知したい（既定値）:
+DLQ に 1 件でも入ったら `ALARM` にしたい（既定値）:
 
 ```hcl
 dlq_depth_alarm_threshold = 0    # 0 件超 = 1 件以上で発報
 ```
 
-ある程度の失敗は許容し、5 件を超えたら通知したい:
+ある程度の失敗は許容し、5 件を超えたら `ALARM` にしたい:
 
 ```hcl
 dlq_depth_alarm_threshold          = 5
@@ -215,25 +225,58 @@ dlq_depth_alarm_evaluation_periods = 2   # 2 分連続で超えたら発報（�
 
 ## 5. 障害対応フロー（本編）
 
-### STEP 1: アラームで気づく
+### STEP 1: アラームの状態を確認する
 
-SNS から次のようなメールが届きます。
+本構成では通知連携を行っていないため、**アラームの状態は自分から見に行きます。**
+日次点検、またはダッシュボードを開いたタイミングで気づくのが起点です。
+
+#### アラーム 4 本の状態をまとめて確認する
+
+```bash
+aws cloudwatch describe-alarms \
+  --alarm-name-prefix dlq-demo \
+  --query 'MetricAlarms[].[AlarmName,StateValue,StateUpdatedTimestamp]' --output table
+```
+
+出力例:
 
 ```
-ALARM: "dlq-demo-dlq-messages-visible" in Asia Pacific (Tokyo)
-
-Threshold Crossed: 1 datapoint [3.0] was greater than the threshold (0.0).
+------------------------------------------------------------------------------
+|                              DescribeAlarms                                |
++-----------------------------------+---------+------------------------------+
+|  dlq-demo-dlq-messages-visible    |  ALARM  |  2026-09-14T01:32:11.000Z    |
+|  dlq-demo-dlq-messages-sent       |  ALARM  |  2026-09-14T01:31:08.000Z    |
+|  dlq-demo-lambda-errors           |  ALARM  |  2026-09-14T01:30:55.000Z    |
+|  dlq-demo-main-queue-age          |  OK     |  2026-09-13T22:10:03.000Z    |
+------------------------------------------------------------------------------
 ```
 
-`[3.0]` の部分が**現在の DLQ 件数**です。この例では 3 件が DLQ に滞留しています。
+`dlq-demo-dlq-messages-visible` が `ALARM` になっていれば、**DLQ にメッセージが滞留しています。**
 
-メールを見逃した場合や、現在のアラーム状態を確認したい場合:
+#### なぜ ALARM になったのかを確認する
 
 ```bash
 aws cloudwatch describe-alarms \
   --alarm-names dlq-demo-dlq-messages-visible \
-  --query 'MetricAlarms[].[AlarmName,StateValue,StateReason]' --output table
+  --query 'MetricAlarms[].StateReason' --output text
 ```
+
+```
+Threshold Crossed: 1 datapoint [3.0] was greater than the threshold (0.0).
+```
+
+`[3.0]` の部分が**検知時点の DLQ 件数**です。この例では 3 件が滞留しています。
+
+#### いつ ALARM になったのかを確認する
+
+```bash
+aws cloudwatch describe-alarm-history \
+  --alarm-name dlq-demo-dlq-messages-visible \
+  --history-item-type StateUpdate --max-records 20 \
+  --query 'AlarmHistoryItems[].[Timestamp,HistorySummary]' --output table
+```
+
+発生時刻がわかると、デプロイ時刻や上流の変更と突き合わせて原因を絞り込めます。
 
 ---
 
@@ -582,7 +625,7 @@ aws cloudwatch describe-alarms \
   --query 'MetricAlarms[].[AlarmName,StateValue,StateUpdatedTimestamp]' --output table
 ```
 
-`StateValue` が `OK` になっていれば復旧完了です。SNS からも「OK:」で始まる復旧メールが届きます（`ok_actions` を設定しているため）。
+`StateValue` が `OK` になっていれば復旧完了です。通知は届かないため、**必ず自分でこのコマンドを実行して確認してください。**
 
 > ⏱️ アラームの状態は最大 1〜2 分遅れて更新されます。すぐに `OK` にならなくても慌てないでください。
 
@@ -608,7 +651,7 @@ aws logs tail "$ECS_LOG_GROUP" --since 15m --format short
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| アラームが発報しない | SNS の購読が未承認 | 確認メールの **Confirm subscription** をクリック |
+| DLQ に溜まっていたのに気づかなかった | 通知連携が無く、定期確認を怠った | 日次点検を確実に回す。運用上どうしても通知が必要なら [補足](#補足-通知が必要になった場合) を参照 |
 | アラームが `INSUFFICIENT_DATA` のまま | DLQ が空でメトリクスが未送信 | `treat_missing_data = "notBreaching"` を設定済みなら正常。一度メッセージを流すとメトリクスが出る |
 | DLQ が空なのにアラームが鳴り続ける | 統計が `Sum` になっている | `ApproximateNumberOfMessagesVisible` は **Maximum** を使う |
 | 再投入が `AccessDenied` で失敗 | DLQ に `redrive_allow_policy` が無い | `aws_sqs_queue_redrive_allow_policy` を適用する |
@@ -626,18 +669,23 @@ aws logs tail "$ECS_LOG_GROUP" --since 15m --format short
 ### 導入時（一度だけ）
 
 - [ ] `terraform apply` が成功した
-- [ ] SNS の確認メールを承認した（`PendingConfirmation` でないこと）
+- [ ] アラームが 4 本作成されていることを確認した（`describe-alarms`）
 - [ ] テストメッセージを送り、ECS タスクが起動してログが出ることを確認した
 - [ ] **わざと失敗するメッセージを送り、3 回失敗して DLQ に入ることを確認した**
-- [ ] **その DLQ 流入でアラームが発報し、メールが届くことを確認した**
+- [ ] **その DLQ 流入でアラームが `ALARM` 状態になることを確認した**
 - [ ] **その DLQ メッセージを再投入できることを確認した**
 - [ ] CloudWatch ダッシュボードをブックマークした
 - [ ] 本ドキュメントを運用チームへ共有した
 
-> ⚠️ 上記の太字 3 項目（**訓練**）は必ず本番投入前に実施してください。「アラームが飛ぶはずだった」で気づかないのが最悪のパターンです。
+> ⚠️ 上記の太字 3 項目（**訓練**）は必ず本番投入前に実施してください。「アラームが上がるはずだった」で気づかないのが最悪のパターンです。
+
+> 🚨 **通知連携が無い構成では、日次点検が唯一の検知手段です。** 実施を属人化させず、
+> 朝会や当番制などで必ず回る仕組みにしてください。
 
 ### 日次
 
+- [ ] **アラーム 4 本の状態を確認する（最重要）**
+      `aws cloudwatch describe-alarms --alarm-name-prefix dlq-demo --query 'MetricAlarms[].[AlarmName,StateValue]' --output table`
 - [ ] ダッシュボードで DLQ が 0 件であることを確認
 - [ ] メインキューの `ApproximateAgeOfOldestMessage` が伸びていないか確認
 
@@ -646,6 +694,43 @@ aws logs tail "$ECS_LOG_GROUP" --since 15m --format short
 - [ ] 過去 1 か月の DLQ 流入件数と原因を棚卸し
 - [ ] `max_receive_count` としきい値が実態に合っているか見直し
 - [ ] ログ保持期間とコストを確認
+
+---
+
+## 補足: 通知が必要になった場合
+
+本構成は意図的に通知連携を行っていません。運用上どうしてもプッシュ通知が必要になった場合は、
+SNS トピックを作成し、各アラームに `alarm_actions` を追加してください。
+
+```hcl
+resource "aws_sns_topic" "alarm" {
+  name = "${var.name_prefix}-alarm-topic"
+}
+
+resource "aws_sns_topic_subscription" "alarm_email" {
+  for_each = toset(var.alarm_email_addresses)
+
+  topic_arn = aws_sns_topic.alarm.arn
+  protocol  = "email"
+  endpoint  = each.value
+}
+
+resource "aws_cloudwatch_metric_alarm" "dlq_depth" {
+  # ... 既存の設定 ...
+
+  alarm_actions = [aws_sns_topic.alarm.arn]
+  ok_actions    = [aws_sns_topic.alarm.arn]   # 復旧も通知する場合
+}
+```
+
+追加する際の注意点:
+
+| 項目 | 内容 |
+|---|---|
+| 購読の承認 | `apply` 後に届く確認メールの **Confirm subscription** をクリックしないと通知は届きません |
+| 承認状態の確認 | `aws sns list-subscriptions-by-topic --topic-arn <ARN>` で `PendingConfirmation` でないことを確認 |
+| 通知先の選択肢 | メール以外に Chatbot（Slack / Teams）、Lambda、SQS なども指定できます |
+| `ok_actions` | 設定すると復旧時にも通知が飛びます。復旧の見落としを防げる一方、通知量は増えます |
 
 ---
 

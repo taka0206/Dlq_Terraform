@@ -14,6 +14,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.properties import PageSetupProperties
+from openpyxl.worksheet.pagebreak import Break
 
 # --- 配色 -------------------------------------------------------------------
 NAVY = "1F3864"      # タイトル帯
@@ -189,6 +190,11 @@ def sheet_intro(wb):
         "【最重要】原因を修正する前に再投入してはいけません。原因が残ったまま戻すと、また規定回数失敗して DLQ に返ってくるだけです。",
         4, DANGER,
     )
+    r = note(
+        ws, r,
+        "【前提】本構成は通知連携 (SNS 等) を行いません。アラームが ALARM になっても通知は届かないため、09_チェックリストの日次点検が唯一の検知手段です。",
+        4, DANGER,
+    )
     r += 1
 
     r = section(ws, r, "3 行でわかる DLQ", 4)
@@ -241,8 +247,8 @@ def sheet_architecture(wb):
          "一時的な障害ならこの間に自然復旧します"),
         ("4. DLQ 退避", "受信回数が maxReceiveCount を超えると SQS が DLQ へ移動する",
          "★ ここが DLQ 行きの瞬間。redrive_policy の設定に基づきます"),
-        ("5. 発報", "CloudWatch アラームが ALARM 状態になり、SNS 経由でメールが届く",
-         "DLQ 件数 > 0 を 1 分周期で監視しています"),
+        ("5. 検知", "CloudWatch アラームが ALARM 状態になる",
+         "★通知連携は行いません。担当者が見に行って気づく (プル型)。日次点検が唯一の検知手段"),
     ]
     stripe = False
     for a, b, c in flow2:
@@ -265,8 +271,8 @@ def sheet_architecture(wb):
         ("イベントソースマッピング", "(Lambda に内包)", "SQS を自動ポーリングして Lambda を起動。同時実行数の上限もここで設定"),
         ("ECS クラスター", "<prefix>-cluster", "Fargate タスクの実行基盤"),
         ("ECS タスク定義", "<prefix>-worker", "実際の業務処理を行うコンテナの定義"),
-        ("SNS トピック", "<prefix>-alarm-topic", "アラーム通知の配信先。メール購読の承認が必須"),
-        ("CloudWatch アラーム", "<prefix>-dlq-messages-visible ほか計 4 本", "DLQ 滞留・流入・遅延・Lambda エラーを監視"),
+        ("CloudWatch アラーム", "<prefix>-dlq-messages-visible ほか計 4 本",
+         "DLQ 滞留・流入・遅延・Lambda エラーを監視。通知先 (alarm_actions) は設定していない"),
         ("CloudWatch ダッシュボード", "<prefix>-dashboard", "件数・エラーを 1 画面で確認する運用画面"),
         ("CloudWatch Logs", "/aws/lambda/<prefix>-dispatcher, /ecs/<prefix>-worker", "障害調査のログ出力先"),
     ]
@@ -325,25 +331,27 @@ def sheet_build(wb):
     r += 1
 
     r = note(ws, r,
-             "【必須】apply 後、SNS から届く確認メールの「Confirm subscription」を必ずクリックしてください。承認しないとアラームが鳴っても通知が届きません。",
+             "【重要】本構成は通知連携 (SNS 等) を行いません。アラームが ALARM になっても誰にも通知は届きません。09_チェックリストの日次点検が唯一の検知手段です。",
              5, DANGER)
     r += 1
 
     r = section(ws, r, "適用直後の必須作業", 5)
     r = header(ws, r, ["", "#", "作業", "コマンド / 操作", "完了条件"])
     post = [
-        ("1", "SNS メール購読の承認", "受信メール内の Confirm subscription をクリック",
-         "SubscriptionArn が PendingConfirmation でないこと"),
-        ("2", "購読状態の確認",
-         'aws sns list-subscriptions-by-topic --topic-arn "$(terraform output -raw sns_topic_arn)"',
-         "Endpoint が一覧に表示される"),
+        ("1", "アラーム 4 本の作成を確認",
+         'aws cloudwatch describe-alarms --alarm-name-prefix dlq-demo \\\n  --query "MetricAlarms[].[AlarmName,StateValue]" --output table',
+         "4 本すべて表示されること。直後は INSUFFICIENT_DATA でもよい"),
+        ("2", "日次点検の実施体制を決める", "朝会・当番制など、点検が確実に回る仕組みを用意する",
+         "通知が無いため、点検を属人化させないことが必須"),
         ("3", "出力値の記録", "terraform output", "main_queue_url / dlq_url / dlq_arn / main_queue_arn を控える"),
         ("4", "ダッシュボード登録", "CloudWatch → ダッシュボード → <prefix>-dashboard", "ブックマークに追加"),
         ("5", "疎通テスト",
          'aws sqs send-message --queue-url "$MAIN_URL" --message-body \'{"test": true}\'',
          "ECS タスクが起動しログが出ること"),
         ("6", "DLQ 到達テスト", "わざと失敗するメッセージを送る", "3 回失敗して DLQ に入ること"),
-        ("7", "アラーム発報テスト", "上記 6 の後、メール受信を待つ", "ALARM メールが届くこと"),
+        ("7", "アラーム状態テスト",
+         'aws cloudwatch describe-alarms --alarm-name-prefix dlq-demo \\\n  --query "MetricAlarms[].[AlarmName,StateValue]" --output table',
+         "dlq-messages-visible が ALARM になること"),
         ("8", "再投入テスト", "07_コマンド集の再投入コマンドを実行", "DLQ が 0 件に戻ること"),
     ]
     stripe = False
@@ -465,11 +473,15 @@ def sheet_alarms(wb):
     widths(ws, [4, 30, 34, 12, 12, 16, 46])
     r = title(ws, "CloudWatch アラーム設定", "DLQ の件数に気づくための監視 4 本", 7)
 
-    r = header(ws, r, ["", "アラーム名", "メトリクス", "統計", "期間", "しきい値", "何を意味するか / 鳴ったらどうするか"])
+    r = note(ws, r,
+             "本構成のアラームには通知先 (alarm_actions) を設定していません。アラームは「状態を判定して記録する」までを担い、担当者への通知は行いません。必ず自分から見に行ってください。",
+             7, DANGER)
+    r += 1
+    r = header(ws, r, ["", "アラーム名", "メトリクス", "統計", "期間", "しきい値", "何を意味するか / ALARM を見つけたらどうするか"])
     alarms = [
         ("<prefix>-dlq-messages-visible\n★最重要",
          "ApproximateNumberOfMessagesVisible\n(AWS/SQS)", "Maximum", "60 秒", "> 0",
-         "DLQ に未処理メッセージが滞留している。1 件でも残る限り発報し続ける。→ 06_対応手順 STEP1 へ"),
+         "DLQ に未処理メッセージが滞留している。1 件でも残る限り ALARM のまま。→ 06_対応手順 STEP1 へ"),
         ("<prefix>-dlq-messages-sent",
          "NumberOfMessagesSent\n(AWS/SQS)", "Sum", "300 秒", "> 0",
          "新たに DLQ へ流入した。増加の「瞬間」を捉える。→ 流入が続いているかを確認"),
@@ -507,13 +519,14 @@ def sheet_alarms(wb):
     others = [
         ("treat_missing_data", "notBreaching",
          "DLQ が空のとき SQS はメトリクスを送信しないことがある。「データなし＝正常」と扱い、誤発報を防ぐ"),
-        ("alarm_actions", "SNS トピック ARN", "ALARM 状態になったときにメール通知する"),
-        ("ok_actions (滞留アラームのみ)", "SNS トピック ARN",
-         "OK に戻ったときも通知する。復旧を確実に把握するため"),
+        ("alarm_actions", "(未設定)",
+         "★通知先を設定していない。通知が必要になったら SNS トピックを作成してここに指定する"),
+        ("ok_actions", "(未設定)",
+         "復旧時の通知も行わない。OK に戻ったかは describe-alarms で自分で確認する"),
         ("dlq_depth_alarm_threshold", "0 (既定)",
-         "0 件超＝1 件以上で発報。ある程度の失敗を許容するなら 5 などに変更する"),
+         "0 件超＝1 件以上で ALARM。ある程度の失敗を許容するなら 5 などに変更する"),
         ("dlq_depth_alarm_evaluation_periods", "1 (既定)",
-         "1 回でも超えたら発報。瞬間的なスパイクを無視したい場合は 2 以上にする"),
+         "1 回でも超えたら ALARM。瞬間的なスパイクを無視したい場合は 2 以上にする"),
     ]
     stripe = False
     for item in others:
@@ -529,13 +542,13 @@ def sheet_alarms(wb):
     r = header(ws, r, ["", "やりたいこと", "設定 (terraform.tfvars)", "", "", "", "効果"])
     r = row_out(ws, r, ["", "1 件でも入ったら即通知 (既定)",
                         "dlq_depth_alarm_threshold = 0\ndlq_depth_alarm_evaluation_periods = 1",
-                        "", "", "", "最速で検知できる。小規模・重要度の高いシステム向け"],
+                        "", "", "", "最も早く ALARM になる。小規模・重要度の高いシステム向け"],
                 bold_first=True, height=42)
     ws.merge_cells(start_row=r - 1, start_column=3, end_row=r - 1, end_column=6)
     mono(ws, f"C{r - 1}")
     r = row_out(ws, r, ["", "5 件を超えたら通知",
                         "dlq_depth_alarm_threshold = 5\ndlq_depth_alarm_evaluation_periods = 2",
-                        "", "", "", "2 分連続で 5 件超のときだけ発報。ノイズを抑えたい大規模システム向け"],
+                        "", "", "", "2 分連続で 5 件超のときだけ ALARM。ノイズを抑えたい大規模システム向け"],
                 fill=STRIPE, bold_first=True, height=42)
     ws.merge_cells(start_row=r - 1, start_column=3, end_row=r - 1, end_column=6)
     mono(ws, f"C{r - 1}")
@@ -551,7 +564,7 @@ def sheet_procedure(wb):
     ws = wb.create_sheet("06_対応手順")
     widths(ws, [4, 10, 26, 54, 54])
     r = title(ws, "★障害対応手順★  STEP 1 〜 7",
-              "アラーム受信から復旧確認まで。上から順に実施してください", 5)
+              "アラームの確認から復旧確認まで。上から順に実施してください", 5)
 
     r = note(ws, r,
              "【鉄則】STEP 5「原因を修正する」を飛ばして STEP 6「再投入」に進まないこと。原因が残ったまま戻すと、また規定回数失敗して DLQ に返ってくるだけです。",
@@ -576,18 +589,27 @@ def sheet_procedure(wb):
         return row
 
     # STEP 1
-    r = step(r, 1, "アラームで気づく", "通知を受け取り、事実を確認する")
+    r = step(r, 1, "アラームの状態を確認する", "自分から見に行って異常に気づく")
+    r = note(ws, r,
+             "本構成は通知連携を行っていません。アラームは「鳴って知らせてくれるもの」ではなく「見に行けば状態がわかるもの」です。気づく起点は日次点検、またはダッシュボードを開いたときです。",
+             5, WARN)
+    r += 1
     r = steps_header(r)
-    r = s(r, "1-1", "SNS のアラームメールを受信する",
-          'ALARM: "dlq-demo-dlq-messages-visible"\nThreshold Crossed: 1 datapoint [3.0] was\ngreater than the threshold (0.0).',
-          "[3.0] の部分が現在の DLQ 件数。この例では 3 件が滞留している", h=58)
-    r = s(r, "1-2", "アラーム状態をコマンドで確認する",
-          'aws cloudwatch describe-alarms \\\n  --alarm-names dlq-demo-dlq-messages-visible \\\n  --query "MetricAlarms[].[AlarmName,StateValue,StateReason]" \\\n  --output table',
-          "StateValue が ALARM であること。メールを見逃した場合もこれで確認できる",
-          fill=STRIPE, h=64)
-    r = s(r, "1-3", "ダッシュボードで推移を見る",
+    r = s(r, "1-1", "アラーム 4 本の状態をまとめて確認する",
+          'aws cloudwatch describe-alarms \\\n  --alarm-name-prefix dlq-demo \\\n  --query "MetricAlarms[].[AlarmName,StateValue]" \\\n  --output table',
+          "dlq-demo-dlq-messages-visible が ALARM なら DLQ にメッセージが滞留している",
+          fill=WARN, h=64)
+    r = s(r, "1-2", "なぜ ALARM になったのかを確認する",
+          'aws cloudwatch describe-alarms \\\n  --alarm-names dlq-demo-dlq-messages-visible \\\n  --query "MetricAlarms[].StateReason" --output text\n\n→ Threshold Crossed: 1 datapoint [3.0] was\n  greater than the threshold (0.0).',
+          "[3.0] の部分が検知時点の DLQ 件数。この例では 3 件が滞留している",
+          fill=STRIPE, h=90)
+    r = s(r, "1-3", "いつ ALARM になったのかを確認する",
+          'aws cloudwatch describe-alarm-history \\\n  --alarm-name dlq-demo-dlq-messages-visible \\\n  --history-item-type StateUpdate \\\n  --max-records 20 --output table \\\n  --query "AlarmHistoryItems[].[Timestamp,HistorySummary]"',
+          "発生時刻がわかると、デプロイ時刻や上流の変更と突き合わせて原因を絞り込める", h=64)
+    r = s(r, "1-4", "ダッシュボードで推移を見る",
           "CloudWatch → ダッシュボード → dlq-demo-dashboard",
-          "いつから増え始めたか / 増え続けているか止まったか を把握する", h=32)
+          "いつから増え始めたか / 増え続けているか止まったか を把握する",
+          fill=STRIPE, h=32)
     r += 1
 
     # STEP 2
@@ -810,7 +832,7 @@ def sheet_procedure(wb):
           "0 に向かって減っていること", h=44)
     r = s(r, "7-3", "アラームが OK に戻ったか",
           'aws cloudwatch describe-alarms \\\n  --alarm-names dlq-demo-dlq-messages-visible \\\n  --query "MetricAlarms[].[AlarmName,StateValue]" --output table',
-          "StateValue が OK。SNS からも「OK:」で始まる復旧メールが届く (最大 1〜2 分遅れる)",
+          "StateValue が OK であること。通知は届かないため必ず自分で実行して確認する (反映は最大 1〜2 分遅れる)",
           fill=OK, h=58)
     r = s(r, "7-4", "ECS タスクが正常終了したか",
           'aws logs tail "$ECS_LOG_GROUP" --since 15m --format short',
@@ -858,9 +880,9 @@ def sheet_commands(wb):
         ("アラーム", "2-2", "アラームの状態変化履歴",
          'aws cloudwatch describe-alarm-history \\\n  --alarm-name dlq-demo-dlq-messages-visible \\\n  --history-item-type StateUpdate --max-records 20',
          "いつ ALARM になったかを調べる"),
-        ("アラーム", "2-3", "SNS 購読状態を確認",
-         'aws sns list-subscriptions-by-topic \\\n  --topic-arn "$(terraform output -raw sns_topic_arn)" \\\n  --query "Subscriptions[].[Endpoint,SubscriptionArn]" --output table',
-         "PendingConfirmation でないこと"),
+        ("アラーム", "2-3", "ALARM 状態のものだけを抽出",
+         'aws cloudwatch describe-alarms --state-value ALARM \\\n  --alarm-name-prefix dlq-demo \\\n  --query "MetricAlarms[].[AlarmName,StateReason]" --output table',
+         "日次点検はこれ 1 本でよい"),
 
         ("中身確認", "3-1", "DLQ のメッセージを覗く (削除しない)",
          'aws sqs receive-message --queue-url "$DLQ_URL" \\\n  --max-number-of-messages 10 \\\n  --visibility-timeout 0 \\\n  --message-attribute-names All \\\n  --message-system-attribute-names All',
@@ -928,8 +950,8 @@ def sheet_troubleshoot(wb):
 
     r = header(ws, r, ["", "#", "症状", "原因", "対処"])
     rows = [
-        ("1", "アラームが発報しない", "SNS の購読が未承認",
-         "確認メールの「Confirm subscription」をクリック。list-subscriptions-by-topic で PendingConfirmation でないことを確認"),
+        ("1", "DLQ に溜まっていたのに気づかなかった", "通知連携が無く、定期確認を怠った",
+         "09_チェックリストの日次点検を確実に回す。どうしても通知が必要なら本シート下部の補足を参照"),
         ("2", "アラームが INSUFFICIENT_DATA のまま", "DLQ が空でメトリクスが未送信",
          "treat_missing_data = notBreaching を設定済みなら正常。一度メッセージを流すとメトリクスが出る"),
         ("3", "DLQ が空なのにアラームが鳴り続ける", "統計が Sum になっている",
@@ -962,6 +984,32 @@ def sheet_troubleshoot(wb):
     stripe = False
     for a, b, c, d in rows:
         r = row_out(ws, r, ["", a, b, c, d], fill=STRIPE if stripe else None, height=34)
+        stripe = not stripe
+    r += 1
+
+    # 補足はページをまたいで見出しと表が分断されないよう、改ページしてから描く
+    ws.row_breaks.append(Break(id=r - 1))
+    r = section(ws, r, "補足: 通知 (プッシュ通知) が必要になった場合", 5)
+    r = note(ws, r,
+             "本構成は意図的に通知連携を行っていません。運用上どうしても必要になった場合のみ、以下を追加してください。",
+             5, LIGHT)
+    r = header(ws, r, ["", "#", "追加するもの", "内容", "注意点"])
+    extra = [
+        ("1", "SNS トピック", 'resource "aws_sns_topic" "alarm" { ... }',
+         "通知の配信先となるトピックを作成する"),
+        ("2", "サブスクリプション",
+         'resource "aws_sns_topic_subscription" "alarm_email" {\n  protocol = "email"\n  endpoint = "ops@example.com"\n}',
+         "メール以外に Chatbot (Slack / Teams)、Lambda、SQS も指定できる"),
+        ("3", "アラームへの通知先指定",
+         'alarm_actions = [aws_sns_topic.alarm.arn]\nok_actions    = [aws_sns_topic.alarm.arn]',
+         "ok_actions を入れると復旧時にも通知される。見落とし防止になる一方、通知量は増える"),
+        ("4", "購読の承認", "apply 後に届く確認メールの Confirm subscription をクリック",
+         "★これを忘れると通知は届かない。list-subscriptions-by-topic で PendingConfirmation でないことを確認"),
+    ]
+    stripe = False
+    for a, b, c, d in extra:
+        r = row_out(ws, r, ["", a, b, c, d], fill=STRIPE if stripe else None, height=48)
+        mono(ws, f"D{r - 1}")
         stripe = not stripe
 
     freeze(ws)
@@ -1023,27 +1071,30 @@ def sheet_checklist(wb):
 
     r = block(r, "導入時（一度だけ）", [
         ("terraform apply が成功した", "Apply complete! が表示されること", False),
-        ("SNS のメール購読を承認した", "SubscriptionArn が PendingConfirmation でないこと", True),
+        ("アラームが 4 本作成されたことを確認した", "describe-alarms --alarm-name-prefix dlq-demo で 4 本表示される", False),
+        ("日次点検の実施体制を決めた", "通知が無いため、朝会・当番制など点検が確実に回る仕組みが必須", True),
         ("terraform output の値を控えた", "main_queue_url / dlq_url / dlq_arn / main_queue_arn", False),
         ("CloudWatch ダッシュボードをブックマークした", "<prefix>-dashboard", False),
         ("疎通テストを実施した", "テストメッセージで ECS タスクが起動しログが出ること", False),
         ("【訓練】わざと失敗させ DLQ に入ることを確認した", "3 回失敗して DLQ の件数が増えること", True),
-        ("【訓練】アラームが発報しメールが届くことを確認した", "ALARM メールを実際に受信すること", True),
+        ("【訓練】アラームが ALARM 状態になることを確認した", "describe-alarms で StateValue が ALARM になること", True),
         ("【訓練】再投入できることを確認した", "start-message-move-task で DLQ が 0 件に戻ること", True),
         ("本ドキュメントを運用チームへ共有した", "担当者全員が参照できる場所に配置", False),
     ], "緑色の項目は必ず本番投入前に実施してください。特に【訓練】3 項目を省略すると、本番障害時に『アラームが飛ぶはずだった』で気づけません。")
 
     r = block(r, "日次", [
+        ("★アラーム 4 本の状態を確認（最重要）",
+         "aws cloudwatch describe-alarms --state-value ALARM --alarm-name-prefix dlq-demo", True),
         ("DLQ が 0 件であることを確認", "ダッシュボード または get-queue-attributes", False),
         ("メインキューの滞留時間が伸びていないか確認", "ApproximateAgeOfOldestMessage が閾値以下", False),
         ("Lambda のエラー件数を確認", "ダッシュボードの Lambda パネル", False),
-        ("前日に発報したアラームの有無を確認", "describe-alarm-history", False),
+        ("前日に ALARM になったアラームの有無を確認", "describe-alarm-history", False),
     ])
 
     r = block(r, "月次", [
         ("過去 1 か月の DLQ 流入件数と原因を棚卸し", "NumberOfMessagesSent の合計と障害記録を突き合わせる", False),
         ("max_receive_count が実態に合っているか見直し", "一時障害で DLQ 行きが多発していないか", False),
-        ("アラームのしきい値を見直し", "誤発報・見落としの有無を確認", False),
+        ("アラームのしきい値を見直し", "誤検知・見落としの有無を確認", False),
         ("ログ保持期間とコストを確認", "log_retention_in_days と CloudWatch の課金額", False),
         ("DLQ 保持期間が 14 日であることを確認", "dlq_message_retention_seconds = 1209600", False),
         ("対応手順書の内容が最新か確認", "構成変更があれば本ブックを更新する", False),

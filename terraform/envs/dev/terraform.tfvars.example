@@ -7,6 +7,3 @@ security_group_ids = ["sg-zzzzzzzzzzzzzzzzz"]
 assign_public_ip   = false
 
 container_image = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/worker:latest"
-
-# アラーム通知先 (apply 後に届く確認メールで Confirm subscription が必要)
-alarm_email_addresses = ["ops@example.com"]

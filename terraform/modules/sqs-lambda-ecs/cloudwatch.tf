@@ -1,18 +1,9 @@
 # ---------------------------------------------------------------------------
-# 通知先 SNS トピック
+# アラーム
+#   本構成では通知連携 (SNS 等) は行わない。アラーム状態は CloudWatch
+#   ダッシュボード、または describe-alarms で確認するプル型の運用とする。
+#   将来的に通知が必要になった場合は、各アラームに alarm_actions を追加する。
 # ---------------------------------------------------------------------------
-resource "aws_sns_topic" "alarm" {
-  name = "${var.name_prefix}-alarm-topic"
-  tags = var.tags
-}
-
-resource "aws_sns_topic_subscription" "alarm_email" {
-  for_each = toset(var.alarm_email_addresses)
-
-  topic_arn = aws_sns_topic.alarm.arn
-  protocol  = "email"
-  endpoint  = each.value
-}
 
 # ---------------------------------------------------------------------------
 # アラーム 1: DLQ の滞留件数  ★ 最重要
@@ -39,9 +30,6 @@ resource "aws_cloudwatch_metric_alarm" "dlq_depth" {
     QueueName = aws_sqs_queue.dlq.name
   }
 
-  alarm_actions = [aws_sns_topic.alarm.arn]
-  ok_actions    = [aws_sns_topic.alarm.arn]
-
   tags = var.tags
 }
 
@@ -65,8 +53,6 @@ resource "aws_cloudwatch_metric_alarm" "dlq_incoming" {
   dimensions = {
     QueueName = aws_sqs_queue.dlq.name
   }
-
-  alarm_actions = [aws_sns_topic.alarm.arn]
 
   tags = var.tags
 }
@@ -92,8 +78,6 @@ resource "aws_cloudwatch_metric_alarm" "main_queue_age" {
     QueueName = aws_sqs_queue.main.name
   }
 
-  alarm_actions = [aws_sns_topic.alarm.arn]
-
   tags = var.tags
 }
 
@@ -116,8 +100,6 @@ resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
   dimensions = {
     FunctionName = aws_lambda_function.dispatcher.function_name
   }
-
-  alarm_actions = [aws_sns_topic.alarm.arn]
 
   tags = var.tags
 }
